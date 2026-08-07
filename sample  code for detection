@@ -1,0 +1,32 @@
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.naive_bayes import MultinomialNB
+
+# Load dataset
+data = pd.read_csv("news_dataset.csv")
+
+# Train model
+vectorizer = TfidfVectorizer()
+X = vectorizer.fit_transform(data["text"])
+y = data["label"]
+
+model = MultinomialNB()
+model.fit(X, y)
+
+# User input
+news = input("Enter News: ")
+
+# Prediction
+test = vectorizer.transform([news])
+result = model.predict(test)[0]
+
+print("\nPrediction:", result)
+
+# Simple explanation
+keywords = ["free", "microchips", "aliens", "lottery", "urgent", "fake"]
+found = [word for word in keywords if word.lower() in news.lower()]
+
+if found:
+    print("Explanation: Suspicious words found ->", ", ".join(found))
+else:
+    print("Explanation: No suspicious keywords found.")
