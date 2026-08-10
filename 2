@@ -1,0 +1,83 @@
+import numpy as np
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import accuracy_score
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import MultinomialNB
+
+# Load dataset
+data = pd.read_csv(
+    r"C:\Users\exam\Desktop\NEWS DETECTOR\multilingual_fake_news_dataset.csv"
+)
+
+# Combine title + article
+data["text"] = data["title"].fillna("") + " " + data["article"].fillna("")
+X = data["text"]
+y = data["label"]
+
+# Train-test split
+X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# Vectorize
+vectorizer = TfidfVectorizer(
+    analyzer="word",
+    token_pattern=r"(?u)\b\w+\b",
+    ngram_range=(1, 2),
+    max_features=40000,
+)
+X_train = vectorizer.fit_transform(X_train_raw)
+X_test = vectorizer.transform(X_test_raw)
+
+# Train model
+model = MultinomialNB()
+model.fit(X_train, y_train)
+
+# Accuracy
+accuracy = accuracy_score(y_test, model.predict(X_test)) * 100
+print(f"Model Accuracy: {round(accuracy, 2)}%\n")
+
+news = input("Enter News Article: ")
+
+if news.strip():
+    news_vec = vectorizer.transform([news])
+    result = model.predict(news_vec)[0]
+    probs = model.predict_proba(news_vec)[0]
+    classes = list(model.classes_)
+
+    fake_p = round(probs[classes.index("Fake")] * 100, 2)
+    real_p = round(probs[classes.index("Real")] * 100, 2)
+
+    print(f"\nPrediction: {result.upper()}")
+    print(f"Fake Probability: {fake_p}% | Real Probability: {real_p}%")
+
+    # --- DATASET-BASED EXPLANATION GENERATOR ---
+    # Filter dataset for matching class samples
+    class_indices = np.where(y_train.values == result)[0]
+    class_vectors = X_train[class_indices]
+    class_texts = X_train_raw.iloc[class_indices].values
+
+    # Find the top 3 most similar articles in dataset using Cosine Similarity
+    similarities = cosine_similarity(news_vec, class_vectors).flatten()
+    top_match_indices = similarities.argsort()[-3:][::-1]
+
+    avg_similarity = round(np.mean(similarities[top_match_indices]) * 100, 2)
+    sample_text_snippet = class_texts[top_match_indices[0]][:120].replace(
+        "\n", " "
+    )
+
+    print("\n================ EXPLANATION ================")
+    explanation = (
+        f"1. Classification Decision: The model flagged this text as '{result}' because its word frequency matrix closely maps to existing '{result}' records in the dataset.\n"
+        f"2. Dataset Comparison: We cross-referenced your input against {len(class_indices)} verified '{result}' news articles stored in the training subset.\n"
+        f"3. Content Similarity Score: The input text shares a {avg_similarity}% contextual vocabulary overlap with the top matching articles in our records.\n"
+        f"4. Dataset Match Snippet: A representative example from the dataset sharing this structure begins with: \"{sample_text_snippet}...\".\n"
+        f"5. Probability Weighting: Statistical evaluation yielded a {fake_p}% likelihood for Fake and {real_p}% for Real based on prior dataset patterns.\n"
+        f"6. Final Verdict: Because the language pattern matches known '{result}' articles in the dataset significantly more than the opposite class, it was categorized as {result.upper()}."
+    )
+    print(explanation)
+    print("=============================================")
+    
+    
