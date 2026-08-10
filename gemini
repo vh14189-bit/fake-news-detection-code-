@@ -1,0 +1,117 @@
+import numpy as np
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import accuracy_score
+from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import MultinomialNB
+
+# Load dataset
+data = pd.read_csv(
+    r"C:\Users\exam\Desktop\NEWS DETECTOR\multilingual_fake_news_dataset.csv"
+)
+
+# Combine title + article
+data["text"] = data["title"].fillna("") + " " + data["article"].fillna("")
+
+# Features and labels
+X = data["text"]
+y = data["label"]
+
+# Train-test split FIRST (prevents data leakage during vectorization)
+X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# Convert text to numbers using character/word n-grams for multilingual support
+vectorizer = TfidfVectorizer(
+    analyzer="word",
+    token_pattern=r"(?u)\b\w+\b",  # Retains non-ASCII characters (e.g. Devanagari, Tamil, etc.)
+    ngram_range=(1, 2),  # Captures both single words and two-word phrases
+    max_features=40000,
+)
+
+X_train = vectorizer.fit_transform(X_train_raw)
+X_test = vectorizer.transform(X_test_raw)
+
+# Train model
+model = MultinomialNB()
+model.fit(X_train, y_train)
+
+# Calculate Accuracy
+prediction = model.predict(X_test)
+accuracy = accuracy_score(y_test, prediction) * 100
+
+print("\n==============================")
+print("     NEWS DETECTOR")
+print("==============================")
+print("Model Accuracy:", round(accuracy, 2), "%")
+
+# Input News
+news = input("\nEnter News Article: ")
+
+if not news.strip():
+    print("Error: Empty input provided.")
+else:
+    # Predict
+    news_vector = vectorizer.transform([news])
+    result = model.predict(news_vector)[0]
+    probability = model.predict_proba(news_vector)[0]
+    classes = list(model.classes_)
+
+    fake_idx = classes.index("Fake")
+    real_idx = classes.index("Real")
+
+    fake = probability[fake_idx] * 100
+    real = probability[real_idx] * 100
+
+    print("\n==============================")
+    print("RESULT")
+    print("==============================")
+    print("Prediction:", result.upper())
+    print("Fake Probability:", round(fake, 2), "%")
+    print("Real Probability:", round(real, 2), "%")
+
+    # --- FEATURE IMPORTANCE EXPLANATION ---
+    feature_names = np.array(vectorizer.get_feature_names_out())
+    nonzero_indices = news_vector.nonzero()[1]
+
+    if len(nonzero_indices) == 0:
+        print(
+            "\nExplanation: None of the words in this article were recognized from the training dataset."
+        )
+    else:
+        # Extract Log Probabilities for the classes
+        log_prob_fake = model.feature_log_prob_[fake_idx]
+        log_prob_real = model.feature_log_prob_[real_idx]
+
+        # Calculate log-ratio for words present in input (Higher = More Fake, Lower = More Real)
+        word_impacts = []
+        for idx in nonzero_indices:
+            word = feature_names[idx]
+            tfidf_score = news_vector[0, idx]
+            ratio = log_prob_fake[idx] - log_prob_real[idx]
+            word_impacts.append((word, ratio, tfidf_score))
+
+        # Sort words based on prediction result
+        if result == "Fake":
+            # Words with highest fake-to-real log ratio
+            top_words = sorted(word_impacts, key=lambda x: x[1], reverse=True)[
+                :5
+            ]
+            print("\nWhy it is classified as FAKE:")
+            print(
+                "The following key terms in your text carry strong statistical association with FAKE news in the training data:\n"
+            )
+            for word, ratio, tfidf in top_words:
+                print(f"  • '{word}'")
+        else:
+            # Words with lowest fake-to-real log ratio (highest real score)
+            top_words = sorted(word_impacts, key=lambda x: x[1])[:5]
+            print("\nWhy it is classified as REAL:")
+            print(
+                "The following key terms in your text carry strong statistical association with REAL news in the training data:\n"
+            )
+            for word, ratio, tfidf in top_words:
+                print(f"  • '{word}'")
+
+    print("==============================")
