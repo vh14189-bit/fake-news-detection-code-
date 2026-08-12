@@ -1,0 +1,500 @@
+import importlib
+import sys
+
+import numpy as np
+import pandas as pd
+import requests
+
+from bs4 import BeautifulSoup
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import accuracy_score
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.model_selection import train_test_split
+from sklearn.naive_bayes import MultinomialNB
+
+
+# ============================================================
+# 1. LOAD DATASET
+# ============================================================
+
+data = pd.read_csv(
+    r"C:\Users\exam\Desktop\NEWS DETECTOR\multilingual_fake_news_dataset.csv"
+)
+
+data["text"] = (
+    data["title"].fillna("").astype(str)
+    + " "
+    + data["article"].fillna("").astype(str)
+)
+
+X = data["text"]
+y = data["label"].astype(str)
+
+
+# ============================================================
+# 2. TRAIN / TEST SPLIT
+# ============================================================
+
+X_train_raw, X_test_raw, y_train, y_test = train_test_split(
+    X,
+    y,
+    test_size=0.2,
+    random_state=42,
+    stratify=y
+)
+
+
+# ============================================================
+# 3. TF-IDF
+# ============================================================
+
+vectorizer = TfidfVectorizer(
+    analyzer="word",
+    token_pattern=r"(?u)\b\w+\b",
+    ngram_range=(1, 2),
+    max_features=40000
+)
+
+X_train = vectorizer.fit_transform(X_train_raw)
+X_test = vectorizer.transform(X_test_raw)
+
+
+# ============================================================
+# 4. TRAIN NAIVE BAYES
+# ============================================================
+
+model = MultinomialNB()
+model.fit(X_train, y_train)
+
+
+# ============================================================
+# 5. ACCURACY
+# ============================================================
+
+predictions = model.predict(X_test)
+
+accuracy = accuracy_score(
+    y_test,
+    predictions
+) * 100
+
+print("\n=============================================")
+print(f"Model Accuracy: {accuracy:.2f}%")
+print("=============================================")
+
+
+# ============================================================
+# 6. NEWSPAPER3K EXTRACTOR
+# ============================================================
+
+def newspaper_extractor(url):
+
+    try:
+
+        # If newspaper3k is not installed, skip this extractor
+        if Article is None:
+            return None, None
+
+        article = Article(url)
+
+        article.download()
+        article.parse()
+
+        title = article.title.strip()
+        text = article.text.strip()
+
+        if len(text) > 100:
+
+            print("\n[+] newspaper3k extraction successful")
+
+            return title, text
+
+        return None, None
+
+    except Exception as e:
+
+        print("\n[-] newspaper3k failed:")
+        print(e)
+
+        return None, None
+
+
+# ============================================================
+# 7. FALLBACK BEAUTIFULSOUP EXTRACTOR
+# ============================================================
+
+def fallback_extractor(url):
+
+    try:
+
+        print("\n[*] Trying fallback extractor...")
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/151.0.0.0 Safari/537.36"
+            )
+        }
+
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=15
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+
+        # ----------------------------------------------------
+        # TITLE
+        # ----------------------------------------------------
+
+        title = ""
+
+        if soup.find("h1"):
+
+            title = soup.find("h1").get_text(
+                " ",
+                strip=True
+            )
+
+        elif soup.title:
+
+            title = soup.title.get_text(
+                " ",
+                strip=True
+            )
+
+
+        # ----------------------------------------------------
+        # REMOVE UNWANTED HTML
+        # ----------------------------------------------------
+
+        for element in soup(
+            [
+                "script",
+                "style",
+                "nav",
+                "footer",
+                "header",
+                "aside",
+                "form",
+                "noscript"
+            ]
+        ):
+
+            element.decompose()
+
+
+        # ----------------------------------------------------
+        # FIND ARTICLE
+        # ----------------------------------------------------
+
+        article_tag = soup.find("article")
+
+        if article_tag:
+
+            paragraphs = article_tag.find_all("p")
+
+        else:
+
+            paragraphs = soup.find_all("p")
+
+
+        text = " ".join(
+            p.get_text(" ", strip=True)
+            for p in paragraphs
+        )
+
+
+        if len(text) > 100:
+
+            print(
+                "[+] Fallback extraction successful"
+            )
+
+            return title, text
+
+
+        print(
+            "[-] Fallback could not find enough text"
+        )
+
+        return None, None
+
+
+    except Exception as e:
+
+        print("\n[-] Fallback extractor failed:")
+        print(e)
+
+        return None, None
+
+
+# ============================================================
+# 8. COMBINED URL EXTRACTOR
+# ============================================================
+
+def extract_article(url):
+
+    print("\n=============================================")
+    print("        ARTICLE EXTRACTION STARTED")
+    print("=============================================")
+
+    # First method
+    title, text = newspaper_extractor(url)
+
+    # Second method if first fails
+    if not text:
+
+        title, text = fallback_extractor(url)
+
+
+    if not text:
+
+        print("\n[ERROR] Could not extract article.")
+        return None
+
+
+    print("\n=============================================")
+    print("        ARTICLE EXTRACTION COMPLETE")
+    print("=============================================")
+
+    print("\nTitle:")
+    print(title)
+
+    print("\nArticle preview:")
+    print(text[:500])
+
+    print("\n=============================================")
+
+    return title + " " + text
+
+
+# ============================================================
+# 9. GET URL
+# ============================================================
+
+url = input(
+    "\nEnter News Article URL: "
+).strip()
+
+
+# ============================================================
+# 10. CHECK URL
+# ============================================================
+
+if not (
+    url.startswith("http://")
+    or url.startswith("https://")
+):
+
+    print(
+        "\n[ERROR] URL must start with http:// or https://"
+    )
+
+    exit()
+
+
+# ============================================================
+# 11. EXTRACT ARTICLE
+# ============================================================
+
+news = extract_article(url)
+
+
+if news:
+
+    # ========================================================
+    # 12. TF-IDF TRANSFORMATION
+    # ========================================================
+
+    news_vec = vectorizer.transform(
+        [news]
+    )
+
+
+    # ========================================================
+    # 13. PREDICTION
+    # ========================================================
+
+    result = model.predict(
+        news_vec
+    )[0]
+
+
+    # ========================================================
+    # 14. PROBABILITY
+    # ========================================================
+
+    probs = model.predict_proba(
+        news_vec
+    )[0]
+
+    classes = list(
+        model.classes_
+    )
+
+
+    fake_p = 0
+
+    real_p = 0
+
+
+    if "Fake" in classes:
+
+        fake_p = round(
+            probs[classes.index("Fake")] * 100,
+            2
+        )
+
+
+    if "Real" in classes:
+
+        real_p = round(
+            probs[classes.index("Real")] * 100,
+            2
+        )
+
+
+    # ========================================================
+    # 15. RESULT
+    # ========================================================
+
+    print("\n\n=============================================")
+    print("             FAKE NEWS DETECTOR")
+    print("=============================================")
+
+    print(
+        f"\nPrediction: {result.upper()}"
+    )
+
+    print(
+        f"Fake Probability: {fake_p}%"
+    )
+
+    print(
+        f"Real Probability: {real_p}%"
+    )
+
+
+    # ========================================================
+    # 16. DATASET SIMILARITY
+    # ========================================================
+
+    class_indices = np.where(
+        y_train.values == result
+    )[0]
+
+
+    if len(class_indices) > 0:
+
+        class_vectors = X_train[
+            class_indices
+        ]
+
+        class_texts = X_train_raw.iloc[
+            class_indices
+        ].values
+
+
+        similarities = cosine_similarity(
+            news_vec,
+            class_vectors
+        ).flatten()
+
+
+        number_of_matches = min(
+            3,
+            len(similarities)
+        )
+
+
+        top_indices = (
+            similarities.argsort()
+            [-number_of_matches:][::-1]
+        )
+
+
+        avg_similarity = round(
+            np.mean(
+                similarities[top_indices]
+            ) * 100,
+            2
+        )
+
+
+        best_match = top_indices[0]
+
+
+        snippet = class_texts[
+            best_match
+        ][:200].replace(
+            "\n",
+            " "
+        )
+
+
+        # ====================================================
+        # 17. EXPLANATION
+        # ====================================================
+
+        print(
+            "\n================ EXPLANATION ================"
+        )
+
+        print(
+            f"\n1. Classification Decision:"
+            f"\nThe Naive Bayes model classified the "
+            f"article as '{result}'."
+        )
+
+        print(
+            f"\n2. Dataset Comparison:"
+            f"\nThe article was compared with "
+            f"{len(class_indices)} training articles "
+            f"from the '{result}' category."
+        )
+
+        print(
+            f"\n3. Similarity Score:"
+            f"\nThe average similarity of the top "
+            f"{number_of_matches} matching articles "
+            f"is {avg_similarity}%."
+        )
+
+        print(
+            f"\n4. Dataset Match:"
+            f"\n\"{snippet}...\""
+        )
+
+        print(
+            f"\n5. Probability:"
+            f"\nFake = {fake_p}%"
+            f"\nReal = {real_p}%"
+        )
+
+        print(
+            f"\n6. Final Verdict:"
+            f"\nThe article is classified as "
+            f"{result.upper()} based on patterns "
+            f"learned from the training dataset."
+        )
+
+        print(
+            "\n============================================="
+        )
+
+else:
+
+    print(
+        "\nArticle extraction failed."
+    )
