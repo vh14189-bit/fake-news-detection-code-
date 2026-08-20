@@ -1,0 +1,1113 @@
+import re
+import csv
+import io
+import importlib
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import requests
+import trafilatura
+
+from bs4 import BeautifulSoup
+try:
+    _langdetect = importlib.import_module("langdetect")
+    detect = _langdetect.detect
+    DetectorFactory = _langdetect.DetectorFactory
+except ImportError:
+    detect = None
+
+    class DetectorFactory:
+        seed = 0
+
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.metrics.pairwise import cosine_similarity
+
+
+# ============================================================
+# MULTILINGUAL FAKE NEWS DETECTION SYSTEM
+# ============================================================
+
+DetectorFactory.seed = 0
+csv.field_size_limit(10_000_000)
+
+
+# ============================================================
+# DATASET URL
+# ============================================================
+#
+# IMPORTANT:
+# This example uses a local CSV containing multilingual
+# article TEXT for training.
+#
+# Your CSV should contain:
+#
+# text
+# label
+# language
+# url   (optional)
+#
+# Example:
+#
+# text,label,language,url
+# "Article text...",real,en,https://...
+# "செய்தி உரை...",fake,ta,https://...
+# "समाचार...",real,hi,https://...
+#
+# ============================================================
+
+DEFAULT_DATASET_PATH = (
+    Path(__file__).resolve().parent
+    / "multilingual_fake_news_dataset_large.csv"
+)
+
+DATASET_URL = DEFAULT_DATASET_PATH
+
+
+# ============================================================
+# LANGUAGE NAMES
+# ============================================================
+
+LANGUAGES = {
+    "en": "English",
+    "ta": "Tamil",
+    "hi": "Hindi",
+    "te": "Telugu",
+    "ml": "Malayalam",
+    "kn": "Kannada",
+    "bn": "Bengali",
+    "mr": "Marathi",
+    "gu": "Gujarati",
+    "pa": "Punjabi",
+    "ur": "Urdu",
+    "fr": "French",
+    "de": "German",
+    "es": "Spanish",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "ar": "Arabic",
+    "ru": "Russian",
+    "zh-cn": "Chinese",
+    "ja": "Japanese"
+}
+
+
+# ============================================================
+# DOWNLOAD MULTILINGUAL DATASET
+# ============================================================
+
+def load_dataset():
+
+    print("\n")
+    print("=" * 60)
+    print("          LOADING MULTILINGUAL DATASET")
+    print("=" * 60)
+
+    try:
+
+        if Path(DATASET_URL).is_file():
+            print("\nLoading local dataset...")
+            data = pd.read_csv(
+                DATASET_URL,
+                engine="python",
+                on_bad_lines="skip"
+            )
+        elif DATASET_URL.lower().startswith(("http://", "https://")):
+            headers = {
+                "User-Agent": "Mozilla/5.0"
+            }
+
+            response = requests.get(
+                DATASET_URL,
+                headers=headers,
+                timeout=60
+            )
+
+            response.raise_for_status()
+
+            print("\nDataset downloaded successfully.")
+
+            data = pd.read_csv(
+                io.BytesIO(response.content),
+                engine="python",
+                on_bad_lines="skip"
+            )
+        else:
+            raise FileNotFoundError(
+                f"Dataset file not found or invalid URL: {DATASET_URL}"
+            )
+
+        print(
+            "\nDataset columns:",
+            data.columns.tolist()
+        )
+
+        print(
+            "\nTotal records:",
+            len(data)
+        )
+
+        # ----------------------------------------------------
+        # Find text column
+        # ----------------------------------------------------
+
+        text_columns = [
+            "text",
+            "article",
+            "content",
+            "article_text",
+            "news",
+            "body"
+        ]
+
+        text_column = None
+
+        for column in text_columns:
+
+            if column in data.columns:
+
+                text_column = column
+                break
+
+        if text_column is None:
+
+            print(
+                "\nERROR:"
+            )
+
+            print(
+                "Dataset must contain a text/article/content column."
+            )
+
+            return None
+
+        # ----------------------------------------------------
+        # Find label column
+        # ----------------------------------------------------
+
+        label_columns = [
+            "label",
+            "class",
+            "target",
+            "category"
+        ]
+
+        label_column = None
+
+        for column in label_columns:
+
+            if column in data.columns:
+
+                label_column = column
+                break
+
+        if label_column is None:
+
+            print(
+                "\nERROR:"
+            )
+
+            print(
+                "Dataset must contain a label column."
+            )
+
+            return None
+
+        # ----------------------------------------------------
+        # Rename
+        # ----------------------------------------------------
+
+        data = data.rename(
+            columns={
+                text_column: "text",
+                label_column: "label"
+            }
+        )
+
+        # ----------------------------------------------------
+        # Clean
+        # ----------------------------------------------------
+
+        data["text"] = (
+            data["text"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+        )
+
+        data["label"] = (
+            data["label"]
+            .astype(str)
+            .str.lower()
+            .str.strip()
+        )
+
+        # ----------------------------------------------------
+        # Convert common labels
+        # ----------------------------------------------------
+
+        label_map = {
+
+            "0": "fake",
+            "1": "real",
+
+            "false": "fake",
+            "true": "real",
+
+            "fake news": "fake",
+            "real news": "real",
+
+            "false news": "fake",
+            "true news": "real"
+        }
+
+        data["label"] = data[
+            "label"
+        ].replace(label_map)
+
+        # ----------------------------------------------------
+        # Keep only fake / real
+        # ----------------------------------------------------
+
+        data = data[
+            data["label"].isin(
+                ["fake", "real"]
+            )
+        ]
+
+        # ----------------------------------------------------
+        # Remove empty text
+        # ----------------------------------------------------
+
+        data = data[
+            data["text"].str.len() > 50
+        ]
+
+        data = data.drop_duplicates(
+            subset=["text"]
+        )
+
+        print(
+            "\nUsable articles:",
+            len(data)
+        )
+
+        print(
+            "\nLabel distribution:"
+        )
+
+        print(
+            data["label"].value_counts()
+        )
+
+        return data
+
+    except Exception as e:
+
+        print(
+            "\nERROR loading dataset:"
+        )
+
+        print(e)
+
+        return None
+
+
+# ============================================================
+# ARTICLE EXTRACTION FROM URL
+# ============================================================
+
+def extract_article(url):
+
+    try:
+
+        headers = {
+            "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+
+        response = requests.get(
+            url,
+            headers=headers,
+            timeout=25
+        )
+
+        response.raise_for_status()
+
+        # ----------------------------------------------------
+        # Trafilatura
+        # ----------------------------------------------------
+
+        text = trafilatura.extract(
+            response.text,
+            include_comments=False,
+            include_tables=False
+        )
+
+        if text and len(text.strip()) >= 100:
+
+            return text.strip()
+
+        # ----------------------------------------------------
+        # BeautifulSoup backup
+        # ----------------------------------------------------
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        # Remove unwanted elements
+        for tag in soup([
+            "script",
+            "style",
+            "nav",
+            "footer",
+            "header"
+        ]):
+
+            tag.decompose()
+
+        paragraphs = soup.find_all("p")
+
+        text = " ".join(
+            p.get_text(
+                " ",
+                strip=True
+            )
+            for p in paragraphs
+        )
+
+        if len(text.strip()) >= 100:
+
+            return text.strip()
+
+    except Exception as e:
+
+        print(
+            "\nArticle extraction error:",
+            e
+        )
+
+    return None
+
+
+# ============================================================
+# LANGUAGE DETECTION
+# ============================================================
+
+def detect_language(text):
+
+    try:
+
+        code = detect(text)
+
+        return (
+            LANGUAGES.get(
+                code,
+                code.upper()
+            ),
+            code
+        )
+
+    except:
+
+        return (
+            "Unknown",
+            "unknown"
+        )
+
+
+# ============================================================
+# TRAIN MODEL
+# ============================================================
+
+def train_model(data):
+
+    print("\n")
+    print("=" * 60)
+    print("             TRAINING MODEL")
+    print("=" * 60)
+
+    X = data["text"]
+    y = data["label"]
+
+    if y.nunique() < 2:
+
+        print(
+            "\nERROR: Dataset needs both fake and real articles."
+        )
+
+        return None, None, None
+
+    # --------------------------------------------------------
+    # Train/test
+    # --------------------------------------------------------
+
+    X_train, X_test, y_train, y_test = (
+        train_test_split(
+            X,
+            y,
+            test_size=0.20,
+            random_state=42,
+            stratify=y
+        )
+    )
+
+    # --------------------------------------------------------
+    # Character + word features
+    # --------------------------------------------------------
+
+    vectorizer = TfidfVectorizer(
+
+        analyzer="char",
+
+        ngram_range=(2, 5),
+
+        min_df=1,
+
+        max_features=150000,
+
+        sublinear_tf=True
+    )
+
+    print(
+        "\nCreating multilingual TF-IDF features..."
+    )
+
+    X_train_vector = (
+        vectorizer.fit_transform(
+            X_train
+        )
+    )
+
+    X_test_vector = (
+        vectorizer.transform(
+            X_test
+        )
+    )
+
+    # --------------------------------------------------------
+    # Model
+    # --------------------------------------------------------
+
+    model = LogisticRegression(
+
+        max_iter=2000,
+
+        class_weight="balanced"
+    )
+
+    print(
+        "Training Logistic Regression..."
+    )
+
+    model.fit(
+        X_train_vector,
+        y_train
+    )
+
+    # --------------------------------------------------------
+    # Test
+    # --------------------------------------------------------
+
+    predictions = model.predict(
+        X_test_vector
+    )
+
+    accuracy = accuracy_score(
+        y_test,
+        predictions
+    )
+
+    print("\n")
+    print("=" * 60)
+    print("             MODEL PERFORMANCE")
+    print("=" * 60)
+
+    print(
+        f"\nAccuracy: {accuracy * 100:.2f}%"
+    )
+
+    print(
+        "\nClassification Report:"
+    )
+
+    print(
+        classification_report(
+            y_test,
+            predictions,
+            zero_division=0
+        )
+    )
+
+    return (
+        model,
+        vectorizer,
+        accuracy
+    )
+
+
+# ============================================================
+# FIND SIMILAR ARTICLE
+# ============================================================
+
+def find_similar_article(
+    article,
+    data,
+    vectorizer
+):
+
+    # Use a smaller sample if dataset is huge
+    sample = data
+
+    if len(data) > 5000:
+
+        sample = data.sample(
+            5000,
+            random_state=42
+        )
+
+    article_vector = vectorizer.transform(
+        [article]
+    )
+
+    dataset_vectors = vectorizer.transform(
+        sample["text"].tolist()
+    )
+
+    similarities = cosine_similarity(
+        article_vector,
+        dataset_vectors
+    )[0]
+
+    best_index = np.argmax(
+        similarities
+    )
+
+    best_similarity = (
+        similarities[best_index]
+        * 100
+    )
+
+    best_article = sample.iloc[
+        best_index
+    ]
+
+    return (
+        best_article,
+        best_similarity
+    )
+
+
+# ============================================================
+# FIND SUSPICIOUS CLAIMS / SENTENCES
+# ============================================================
+
+def find_suspicious_claims(
+    article,
+    vectorizer,
+    model
+):
+
+    sentences = re.split(
+        r'(?<=[.!?।])\s+',
+        article
+    )
+
+    sentences = [
+        s.strip()
+        for s in sentences
+        if len(s.strip()) > 30
+    ]
+
+    if not sentences:
+
+        return []
+
+    vectors = vectorizer.transform(
+        sentences
+    )
+
+    probabilities = model.predict_proba(
+        vectors
+    )
+
+    classes = list(
+        model.classes_
+    )
+
+    fake_index = classes.index(
+        "fake"
+    )
+
+    scores = probabilities[
+        :,
+        fake_index
+    ]
+
+    results = []
+
+    for sentence, score in zip(
+        sentences,
+        scores
+    ):
+
+        results.append(
+            (
+                sentence,
+                score * 100
+            )
+        )
+
+    results.sort(
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    return results[:3]
+
+
+# ============================================================
+# ANALYZE NEWS
+# ============================================================
+
+def analyze_news(
+    url,
+    model,
+    vectorizer,
+    data
+):
+
+    print("\n")
+    print("=" * 60)
+    print("          EXTRACTING NEWS ARTICLE")
+    print("=" * 60)
+
+    print(
+        "\nURL:"
+    )
+
+    print(url)
+
+    article = extract_article(
+        url
+    )
+
+    if article is None:
+
+        print(
+            "\nARTICLE EXTRACTION FAILED."
+        )
+
+        print(
+            "Try another news article URL."
+        )
+
+        return
+
+    print(
+        "\nARTICLE EXTRACTED SUCCESSFULLY."
+    )
+
+    # --------------------------------------------------------
+    # Language
+    # --------------------------------------------------------
+
+    language, _ = (
+        detect_language(article)
+    )
+
+    # --------------------------------------------------------
+    # Prediction
+    # --------------------------------------------------------
+
+    vector = vectorizer.transform(
+        [article]
+    )
+
+    probabilities = (
+        model.predict_proba(
+            vector
+        )[0]
+    )
+
+    classes = list(
+        model.classes_
+    )
+
+    fake_probability = (
+        probabilities[
+            classes.index("fake")
+        ]
+    )
+
+    real_probability = (
+        probabilities[
+            classes.index("real")
+        ]
+    )
+
+    fake_percent = (
+        fake_probability * 100
+    )
+
+    real_percent = (
+        real_probability * 100
+    )
+
+    if fake_probability >= real_probability:
+
+        prediction = "POSSIBLY FAKE"
+
+        confidence = fake_percent
+
+        information_risk = fake_percent
+
+    else:
+
+        prediction = "LIKELY REAL"
+
+        confidence = real_percent
+
+        information_risk = fake_percent
+
+    # --------------------------------------------------------
+    # Similar article
+    # --------------------------------------------------------
+
+    similar_article, similarity = (
+        find_similar_article(
+            article,
+            data,
+            vectorizer
+        )
+    )
+
+    # --------------------------------------------------------
+    # Suspicious claims
+    # --------------------------------------------------------
+
+    suspicious = (
+        find_suspicious_claims(
+            article,
+            vectorizer,
+            model
+        )
+    )
+
+    # ========================================================
+    # REQUIRED OUTPUT FORMAT
+    # ========================================================
+
+    print("\n")
+
+    print("=" * 60)
+
+    print(
+        "          MULTILINGUAL NEWS VERIFICATION"
+    )
+
+    print("=" * 60)
+
+    print()
+
+    print(
+        "URL:"
+    )
+
+    print(url)
+
+    print()
+
+    print(
+        f"Detected Language : {language}"
+    )
+
+    print()
+
+    print(
+        f"Prediction         : {prediction}"
+    )
+
+    print()
+
+    print(
+        f"Fake Probability   : {fake_percent:.2f}%"
+    )
+
+    print(
+        f"Real Probability   : {real_percent:.2f}%"
+    )
+
+    print()
+
+    print(
+        f"Model Confidence   : {confidence:.2f}%"
+    )
+
+    print()
+
+    print(
+        f"Information Risk   : {information_risk:.2f}%"
+    )
+
+    print()
+
+    print("-" * 60)
+
+    print(
+        "WHY WAS IT FLAGGED?"
+    )
+
+    print("-" * 60)
+
+    print()
+
+    if prediction == "POSSIBLY FAKE":
+
+        print(
+            "The article contains patterns that are"
+        )
+
+        print(
+            "strongly associated with fake articles"
+        )
+
+        print(
+            "in the multilingual training dataset."
+        )
+
+        print()
+
+        print(
+            "Potential suspicious claims:"
+        )
+
+        if suspicious:
+
+            for i, (sentence, _) in enumerate(
+                suspicious,
+                1
+            ):
+
+                # Limit output length
+                short_sentence = sentence
+
+                if len(short_sentence) > 250:
+
+                    short_sentence = (
+                        short_sentence[:247]
+                        + "..."
+                    )
+
+                print(
+                    f"{i}. {short_sentence}"
+                )
+
+        else:
+
+            print(
+                "1. No strong suspicious sentence identified."
+            )
+
+        print()
+
+        print(
+            "Similar Fake Article:"
+        )
+
+        if similar_article["label"] == "fake":
+
+            print(
+                similar_article["text"][:300]
+                + "..."
+            )
+
+        else:
+
+            print(
+                "No strong fake training article found."
+            )
+
+        print()
+
+        print(
+            f"Similarity: {similarity:.2f}%"
+        )
+
+    else:
+
+        print(
+            "The article contains patterns that are"
+        )
+
+        print(
+            "more strongly associated with real"
+        )
+
+        print(
+            "articles in the multilingual dataset."
+        )
+
+        print()
+
+        print(
+            "The model did not find strong evidence"
+        )
+
+        print(
+            "of a fake-news pattern."
+        )
+
+        print()
+
+        print(
+            "Similar Article:"
+        )
+
+        print(
+            similar_article["text"][:300]
+            + "..."
+        )
+
+        print()
+
+        print(
+            f"Similarity: {similarity:.2f}%"
+        )
+
+    # ========================================================
+    # FINAL RESULT
+    # ========================================================
+
+    print()
+
+    print("-" * 60)
+
+    print(
+        "FINAL RESULT"
+    )
+
+    print("-" * 60)
+
+    print()
+
+    if prediction == "POSSIBLY FAKE":
+
+        print(
+            "POSSIBLY FAKE / MISLEADING"
+        )
+
+    else:
+
+        print(
+            "LIKELY REAL"
+        )
+
+    print()
+
+    print(
+        "Note: This percentage is the model's"
+    )
+
+    print(
+        "prediction probability, not proof of"
+    )
+
+    print(
+        "factual falsehood."
+    )
+
+    print()
+
+    print("=" * 60)
+
+
+# ============================================================
+# MAIN PROGRAM
+# ============================================================
+
+def main():
+
+    print("\n")
+
+    print("=" * 60)
+
+    print(
+        "       MULTILINGUAL FAKE NEWS DETECTION SYSTEM"
+    )
+
+    print("=" * 60)
+
+    # --------------------------------------------------------
+    # Load dataset
+    # --------------------------------------------------------
+
+    data = load_dataset()
+
+    if data is None:
+
+        return
+
+    # --------------------------------------------------------
+    # Train
+    # --------------------------------------------------------
+
+    model, vectorizer, _ = (
+        train_model(data)
+    )
+
+    if model is None:
+
+        return
+
+    # --------------------------------------------------------
+    # News URL
+    # --------------------------------------------------------
+
+    print("\n")
+
+    print("=" * 60)
+
+    print(
+        "             ENTER NEWS ARTICLE URL"
+    )
+
+    print("=" * 60)
+
+    url = input(
+        "\nEnter URL: "
+    ).strip()
+
+    if not url.startswith(
+        ("http://", "https://")
+    ):
+
+        print(
+            "\nInvalid URL."
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Analyze
+    # --------------------------------------------------------
+
+    analyze_news(
+        url,
+        model,
+        vectorizer,
+        data
+    )
+
+
+# ============================================================
+# START
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
